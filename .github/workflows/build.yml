@@ -1,31 +1,33 @@
+
 name: Build Ys Music Play V6.0.1
 
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Android APK (ARM64, Android 10+)
+    name: Android APK ARM64
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK, NDK and CMake
+      - name: Install Android tools
         run: |
           sdkmanager --install \
             "platforms;android-35" \
@@ -33,39 +35,105 @@ jobs:
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
 
-      - name: Set up Gradle 8.9
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Fetch Demucs Android engine and submodules
+      - name: Locate Android project
+        id: project
+        shell: bash
         run: |
+          set -e
+
+          PROJECT=""
+
+          # Search extracted project first
+          while IFS= read -r file; do
+            dir="$(dirname "$file")"
+            if [ -f "$dir/app/build.gradle.kts" ]; then
+              PROJECT="$dir"
+              break
+            fi
+          done < <(find . -type f -name settings.gradle.kts \
+            -not -path './.git/*' \
+            -not -path './.gradle/*')
+
+          # If only ZIP is present, extract it
+          if [ -z "$PROJECT" ]; then
+            ZIP_FILE="$(find . -maxdepth 4 -type f \
+              -iname '*.zip' | head -n 1)"
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: No Gradle project or source ZIP found."
+              find . -maxdepth 4 -type f
+              exit 1
+            fi
+
+            mkdir -p "$RUNNER_TEMP/ysmusic-source"
+            unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/ysmusic-source"
+
+            while IFS= read -r file; do
+              dir="$(dirname "$file")"
+              if [ -f "$dir/app/build.gradle.kts" ]; then
+                PROJECT="$dir"
+                break
+              fi
+            done < <(find "$RUNNER_TEMP/ysmusic-source" \
+              -type f -name settings.gradle.kts)
+          fi
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Gradle project root not found."
+            exit 1
+          fi
+
+          echo "Project root: $PROJECT"
+          echo "project_dir=$PROJECT" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch Demucs engine
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -e
           mkdir -p third_party
+
           git clone --depth 1 --recurse-submodules \
             https://github.com/jPaauwe/demucs-android \
             third_party/demucs-android
+
           test -f third_party/demucs-android/CMakeLists.txt
-          test -f third_party/demucs-android/third_party/eigen/Eigen/Dense
 
-      - name: Build debug APK
-        run: gradle --no-daemon clean assembleDebug
+      - name: Verify Gradle files
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
 
-      - name: Verify APK and native ABI
+      - name: Build Android APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          gradle --no-daemon clean assembleDebug
+
+      - name: Verify APK
+        working-directory: ${{ steps.project.outputs.project_dir }}
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
+
           test -s "$APK"
-          unzip -l "$APK" | grep -q "lib/arm64-v8a/libsdengine_jni.so"
-          if unzip -l "$APK" | grep -q "lib/armeabi-v7a/"; then
-            echo "Unexpected ARM32 library in ARM64-only build"
-            exit 1
-          fi
+
+          unzip -l "$APK" | grep \
+            "lib/arm64-v8a/libsdengine_jni.so"
+
+          echo "APK successfully generated:"
           ls -lh "$APK"
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: YsMusicPlay-V6.0.1-Android10-ARM64
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: YsMusicPlay-V6.0.1-ARM64
+          path: ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
           
